@@ -11,7 +11,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface AudioQueuePlayer : NSObject
+@interface AudioQueuePlayer : NSObject <NSURLSessionDataDelegate>
 
 - (id)initWithURL:(NSURL *)inURL;
 - (double)framePerSecond;

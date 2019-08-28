@@ -15,7 +15,7 @@ typedef struct {
 } APPacketData;
 
 @implementation AudioQueuePlayer {
-	NSURLConnection *URLConnection;
+	NSURLSessionDataTask *dataTask;
 	struct {
 		BOOL stopped;
 		BOOL loaded;
@@ -46,7 +46,7 @@ typedef struct {
 //	}
 //	free(packetData);
 	
-	[URLConnection cancel];
+	[dataTask cancel];
 }
 
 - (id)initWithURL:(NSURL *)inURL {
@@ -60,7 +60,10 @@ typedef struct {
 		// First step: create audio parser, assign callback, create http connection,
 		// start downloading file.
 		
-		URLConnection = [[NSURLConnection alloc] initWithRequest:[NSURLRequest requestWithURL:inURL] delegate:self];
+		NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+		NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:[[NSOperationQueue alloc] init]];
+		dataTask = [session dataTaskWithURL:inURL];
+		[dataTask resume];
 	}
 	return self;
 }
@@ -73,32 +76,34 @@ typedef struct {
 	return 44100.0/1152.0;
 }
 
-#pragma mark - NSURLConnectionDelegate
-- (void)connection:(NSURLConnection *)connection didReceiveResponse:(nonnull NSURLResponse *)response {
+#pragma mark - NSURLSessionDelegate
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveResponse:(NSURLResponse *)response completionHandler:(void (^)(NSURLSessionResponseDisposition))completionHandler {
 	if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
 		if ([(NSHTTPURLResponse *)response statusCode] != 200) {
 			NSLog(@"HTTP code:%ld", [(NSHTTPURLResponse *)response statusCode]);
-			[connection cancel];
+			[dataTask cancel];
 			playerStatus.stopped = YES;
 		}
 	}
+	completionHandler(NSURLSessionResponseAllow);
 }
 
-- (void)connection:(NSURLConnection *)connection didReceiveData:(nonnull NSData *)data {
-	// Step two: got partial file and give it to audio parser
-	// to get pockets from data stream.
-//	AudioFileStreamParseBytes(audiofileStreamID, (UInt32)[data length], [data bytes], 0);
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+		// Step two: got partial file and give it to audio parser
+		// to get pockets from data stream.
+	//	AudioFileStreamParseBytes(audiofileStreamID, (UInt32)[data length], [data bytes], 0);
 }
 
-- (void)cooectionDidFinishLoading:(NSURLConnection *)connection {
-	NSLog(@"Complete loading data");
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+	if (error) {
+		NSLog(@"Failed to load data: %@", [error localizedDescription]);
+	} else {
+		NSLog(@"Complete loading data");
+	}
 	playerStatus.stopped = YES;
 }
 
-- (void)connectionDidFinishLoading:(NSURLConnection *)connection didFailWithError:(NSError *)error {
-	NSLog(@"Failed to load data: %@", [error localizedDescription]);
-	playerStatus.stopped = YES;
-}
 
 #pragma mark - Audio parser and audio queue callbacks
 //- (void)enqueueDataWithPacket:(size_t)inPacketCount {
