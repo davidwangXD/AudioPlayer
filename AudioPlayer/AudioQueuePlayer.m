@@ -8,6 +8,7 @@
 
 #import "AudioQueuePlayer.h"
 
+#pragma mark - AudioQueuePlayer
 static void APAudioFileStreamPropertyListener(void * inCliendData, AudioFileStreamID inAudioFileStream, AudioFileStreamPropertyID inPropertyID, UInt32 * ioFlags);
 static void APAudioFileStreamPacketsCallback(void * inClientData, UInt32 inNumberBytes, UInt32 inNumberPackets, const void * inInputData, AudioStreamPacketDescription *inPacketDescriptions);
 static void APAudioQueueOutputCallback(void * inUserData, AudioQueueRef inAQ, AudioQueueBufferRef inBuffer);
@@ -98,7 +99,11 @@ typedef struct {
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
 	// Step two: got partial file and give it to audio parser
 	// to get pockets from data stream.
-	AudioFileStreamParseBytes(audiofileStreamID, (UInt32)[data length], [data bytes], 0);
+	__weak typeof(self) weakSelf = self;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		__strong typeof(weakSelf) strongSelf = weakSelf;
+		AudioFileStreamParseBytes(strongSelf->audiofileStreamID, (UInt32)[data length], [data bytes], 0);
+	});
 }
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
@@ -123,7 +128,6 @@ typedef struct {
 		// Step six: already finished playing all packet, ends playing file.
 		if (playerStatus.loaded) {
 			AudioQueueStop(outputQueue, false);
-			playerStatus.stopped = YES;
 			return;
 		}
 	}
