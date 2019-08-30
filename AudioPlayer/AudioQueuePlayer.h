@@ -11,12 +11,25 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class AudioQueuePlayer;
+
+@protocol AudioQueuePlayerDelegate <NSObject>
+
+- (void)audioQueuePlayerDidStart:(AudioQueuePlayer *)player;
+- (void)audioQueuePlayerDidStop:(AudioQueuePlayer *)player;
+- (void)audioQueuePlayerDidPause:(AudioQueuePlayer *)player;
+- (void)audioQueuePlayerDidResume:(AudioQueuePlayer *)player;
+- (void)audioQueuePlayer:(AudioQueuePlayer *)player isPlaying:(BOOL)isPlaying atTime:(NSInteger)time;
+
+@end
+
 @interface AudioQueuePlayer : NSObject <NSURLSessionDataDelegate>
 
 - (id)initWithURL:(NSURL *)inURL;
 - (double)framePerSecond;
 
-@property (readonly, getter=isStopped) BOOL stopped;
+@property (nonatomic, readonly, getter=isStopped) BOOL stopped;
+@property (nonatomic, weak) id<AudioQueuePlayerDelegate> delegate;
 
 @end
 

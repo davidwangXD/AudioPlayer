@@ -24,6 +24,7 @@ typedef struct {
 	struct {
 		BOOL stopped;
 		BOOL loaded;
+		BOOL paused;
 	} playerStatus;
 
 	AudioFileStreamID audiofileStreamID;
@@ -59,6 +60,7 @@ typedef struct {
 	self = [super init];
 	if (self) {
 		playerStatus.stopped = NO;
+		playerStatus.paused = NO;
 		packetCount = 0;
 		maxPacketCount = 20480;
 		packetData = (APPacketData *)calloc(maxPacketCount, sizeof(APPacketData));
@@ -97,6 +99,18 @@ typedef struct {
 }
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+	
+	// Simulate network delay
+	static NSInteger count = 0;
+	if (count++ == 2) {
+		[dataTask suspend];
+		NSLog(@"Network suspend");
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			[dataTask resume];
+			NSLog(@"Network resume");
+		});
+	}
+	
 	// Step two: got partial file and give it to audio parser
 	// to get pockets from data stream.
 	__weak typeof(self) weakSelf = self;
@@ -129,6 +143,10 @@ typedef struct {
 		if (playerStatus.loaded) {
 			AudioQueueStop(outputQueue, false);
 			return;
+		} else {
+			AudioQueuePause(outputQueue);
+			playerStatus.paused = YES;
+			[self _audioQueueDidPause];
 		}
 	}
 
@@ -198,19 +216,44 @@ typedef struct {
 	// Step five: Cause the packets which has been parsed is enough, buffering content is big enough.
 	// Thus, starts playing.
 	
-	if (readHead == 0 & packetCount > (int)([self framePerSecond] * 3)) {
+	if (((readHead == 0) | playerStatus.paused) & (packetCount > (int)([self framePerSecond] * 3))) {
+		if (playerStatus.paused) {
+			[self _audioQueueDidResume];
+			playerStatus.paused = NO;
+		}
 		AudioQueueStart(outputQueue, NULL);
 		[self _enqueueDataWithPacketsCount:(int)([self framePerSecond] * 2)];
 	}
 }
 
+#pragma mark - Events
 - (void)_audioQueueDidStart {
 	NSLog(@"Audio Queue did start");
+	if ([self.delegate respondsToSelector:@selector(audioQueuePlayerDidStart:)]) {
+		[self.delegate audioQueuePlayerDidStart:self];
+	}
 }
 
 - (void)_audioQueueDidStop {
 	NSLog(@"Audio Queue did stop");
 	playerStatus.stopped = YES;
+	if ([self.delegate respondsToSelector:@selector(audioQueuePlayerDidStop:)]) {
+		[self.delegate audioQueuePlayerDidStop:self];
+	}
+}
+
+- (void)_audioQueueDidPause {
+	NSLog(@"Audio Queue did pause");
+	if ([self.delegate respondsToSelector:@selector(audioQueuePlayerDidPause:)]) {
+		[self.delegate audioQueuePlayerDidPause:self];
+	}
+}
+
+- (void)_audioQueueDidResume {
+	NSLog(@"Audio Queue did resume");
+	if ([self.delegate respondsToSelector:@selector(audioQueuePlayerDidResume:)]) {
+		[self.delegate audioQueuePlayerDidResume:self];
+	}
 }
 
 #pragma mark - Properties
@@ -221,6 +264,7 @@ typedef struct {
 
 @end
 
+#pragma mark - C Callbacks
 void APAudioFileStreamPropertyListener(void * inCliendData, AudioFileStreamID inAudioFileStream, AudioFileStreamPropertyID inPropertyID, UInt32 * ioFlags) {
 	AudioQueuePlayer *self = (__bridge AudioQueuePlayer *)inCliendData;
 	if (inPropertyID == kAudioFileStreamProperty_DataFormat) {
