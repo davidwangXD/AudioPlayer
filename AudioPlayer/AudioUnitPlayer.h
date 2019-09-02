@@ -16,6 +16,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)play;
 - (void)pause;
 @property (nonatomic, assign, readonly, getter=isStopped) BOOL stopped;
+
+@property (nonatomic, readonly) CFArrayRef iPodEQPresentsArray;
+- (void)selectEQPresent:(NSInteger)value;
 @end
 
 NS_ASSUME_NONNULL_END

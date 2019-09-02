@@ -8,25 +8,25 @@
 
 #import "AudioUnitPlayer.h"
 
-void AUAudioFileStreamPropertyListener(void * inClientData,
+static void AUAudioFileStreamPropertyListener(void * inClientData,
 									   AudioFileStreamID inAudioFileStream,
 									   AudioFileStreamPropertyID inPropertyID,
 									   UInt32 * ioFlags);
 
-void AUAudioFileStreamPacketsCallback(void* inClientData,
+static void AUAudioFileStreamPacketsCallback(void* inClientData,
 									  UInt32 inNumberBytes,
 									  UInt32 inNumberPackets,
 									  const void* inInputData,
 									  AudioStreamPacketDescription* inPacketDescriptions);
 
-OSStatus AUPlayerAURenderCallback(void *userData,
+static OSStatus AUPlayerAURenderCallback(void *userData,
 								  AudioUnitRenderActionFlags *ioActionFlags,
 								  const AudioTimeStamp *inTimeStamp,
 								  UInt32 inBusNumber,
 								  UInt32 inNumberFrames,
 								  AudioBufferList *ioData);
 
-OSStatus AUPlayerConverterFiller(AudioConverterRef inAudioConverter,
+static OSStatus AUPlayerConverterFiller(AudioConverterRef inAudioConverter,
 								 UInt32* ioNumberDataPackets,
 								 AudioBufferList* ioData,
 								 AudioStreamPacketDescription** outDataPacketDescription,
@@ -42,7 +42,10 @@ static const OSStatus AUAudioConverterCallbackErr_NoData = 'kknd';
 		BOOL loaded;
 	} playerStatus;
 	
-	AudioComponentInstance audioUnit;
+	AUGraph audioGraph;
+	AudioUnit mixerUnit;
+	AudioUnit EQUnit;
+	AudioUnit outputUnit;
 	
 	AudioFileStreamID audioFileStreamID;
 	AudioStreamBasicDescription streamDescription;
@@ -73,12 +76,13 @@ AudioStreamBasicDescription KKSignedIntLinearPCMStreamDescription()
 }
 
 @implementation AudioUnitPlayer
-{
-	
-}
 
 - (void)dealloc
 {
+	AUGraphUninitialize(audioGraph);
+	AUGraphClose(audioGraph);
+	DisposeAUGraph(audioGraph);
+	
 	AudioFileStreamClose(audioFileStreamID);
 	AudioConverterDispose(converter);
 	free(renderBufferList->mBuffers[0].mData);
@@ -91,6 +95,34 @@ AudioStreamBasicDescription KKSignedIntLinearPCMStreamDescription()
 
 - (void)buildOutputUnit
 {
+	// 建立 AudioGraph
+	OSStatus status = NewAUGraph(&audioGraph);
+	NSAssert(noErr == status, @"We need to create a new audio graph. %d", (int)status);
+	status = AUGraphOpen(audioGraph);
+	NSAssert(noErr == status, @"We need to open the audio graph. %d", (int)status);
+	
+	// 建立 mixer node
+	AudioComponentDescription mixerUnitDescription;
+	mixerUnitDescription.componentType = kAudioUnitType_Mixer;
+	mixerUnitDescription.componentSubType = kAudioUnitSubType_MultiChannelMixer;
+	mixerUnitDescription.componentManufacturer = kAudioUnitManufacturer_Apple;
+	mixerUnitDescription.componentFlags = 0;
+	mixerUnitDescription.componentFlagsMask = 0;
+	AUNode mixerNode;
+	status = AUGraphAddNode(audioGraph, &mixerUnitDescription, &mixerNode);
+	NSAssert(noErr == status, @"We need to add the mixer node. %d", (int)status);
+	
+	// 建立 EQ node
+	AudioComponentDescription EQUnitDescription;
+	EQUnitDescription.componentType = kAudioUnitType_Effect;
+	EQUnitDescription.componentSubType = kAudioUnitSubType_AUiPodEQ;
+	EQUnitDescription.componentManufacturer = kAudioUnitManufacturer_Apple;
+	EQUnitDescription.componentFlags = 0;
+	EQUnitDescription.componentFlagsMask = 0;
+	AUNode EQNode;
+	status = AUGraphAddNode(audioGraph, &EQUnitDescription, &EQNode);
+	NSAssert(noErr == status, @"We need to add the EQ effect node. %d", (int)status);
+	
 	// 建立 remote IO node
 	AudioComponentDescription outputUnitDescription;
 	bzero(&outputUnitDescription, sizeof(AudioComponentDescription));
@@ -99,20 +131,63 @@ AudioStreamBasicDescription KKSignedIntLinearPCMStreamDescription()
 	outputUnitDescription.componentManufacturer = kAudioUnitManufacturer_Apple;
 	outputUnitDescription.componentFlags = 0;
 	outputUnitDescription.componentFlagsMask = 0;
+	AUNode outputNode;
+	status = AUGraphAddNode(audioGraph, &outputUnitDescription, &outputNode);
+	NSAssert(noErr == status, @"We need to add an output node to the audio graph. %d", (int)status);
 	
-	AudioComponent outputComponent = AudioComponentFindNext(NULL, &outputUnitDescription);
-	OSStatus status = AudioComponentInstanceNew(outputComponent, &audioUnit);
-	NSAssert(noErr == status, @"Must be no error.");
+	// 將 mixer node 連接到 EQ node
+	status = AUGraphConnectNodeInput(audioGraph, mixerNode, 0, EQNode, 0);
+	NSAssert(noErr == status, @"We need to connect the node within the audio graph. %d", (int)status);
 	
-	// 設定 remote IO node 的輸入方式
+	// 將 EQ node 連接到 Remote IO
+	status = AUGraphConnectNodeInput(audioGraph, EQNode, 0, outputNode, 0);
+	NSAssert(noErr == status, @"We need to connect the node within the audio graph. %d", (int)status);
+	
+	
+	// 拿出 Remote IO 的 Audio Unit
+	status = AUGraphNodeInfo(audioGraph, outputNode, &outputUnitDescription, &outputUnit);
+	NSAssert(noErr == status, @"We need to get the audio unit of the output node. %d", (int)status);
+	// 拿出 EQ node 的 Audio Unit
+	status = AUGraphNodeInfo(audioGraph, EQNode, &EQUnitDescription, &EQUnit);
+	NSAssert(noErr == status, @"We need to get the audio unit of the output node. %d", (int)status);
+	// 拿出 mixer node 的 Audio Unit
+	status = AUGraphNodeInfo(audioGraph, mixerNode, &mixerUnitDescription, &mixerUnit);
+	NSAssert(noErr == status, @"We need to get the audio unit of the output node. %d", (int)status);
+	
+	// 設定 mixer node 的輸入輸出格式
 	AudioStreamBasicDescription audioFormat = KKSignedIntLinearPCMStreamDescription();
-	AudioUnitSetProperty(audioUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &audioFormat, sizeof(audioFormat));
+	status = AudioUnitSetProperty(mixerUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &audioFormat, sizeof(audioFormat));
+	NSAssert(noErr == status, @"We need to set input format of the mixer node. %d", (int)status);
+	status = AudioUnitSetProperty(mixerUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &audioFormat, sizeof(audioFormat));
+	NSAssert(noErr == status, @"We need to set output format of the mixer node. %d", (int)status);
+	
+	// 設定 EQ node 的輸入輸出格式
+	status = AudioUnitSetProperty(EQUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &audioFormat, sizeof(audioFormat));
+	NSAssert(noErr == status, @"We need to set input format of the mixer node. %d", (int)status);
+	status = AudioUnitSetProperty(EQUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &audioFormat, sizeof(audioFormat));
+	NSAssert(noErr == status, @"We need to set output format of the mixer node. %d", (int)status);
+	
+	// 設定 Remote IO node 的輸入格式
+	status = AudioUnitSetProperty(outputUnit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &audioFormat, sizeof(audioFormat));
+	NSAssert(noErr == status, @"We need to set input format of the mixer node. %d", (int)status);
+	
+	// 設定 maxFPS
+	UInt32 maxFPS = 4096;
+	status = AudioUnitSetProperty(mixerUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFPS, sizeof(maxFPS));
+	NSAssert(noErr == status, @"We need to set the maximum FPS to the mixer node. %d", (int)status);
+	status = AudioUnitSetProperty(EQUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFPS, sizeof(maxFPS));
+	NSAssert(noErr == status, @"We need to set the maximum FPS to the EQ effect node. %d", (int)status);
+	status = AudioUnitSetProperty(outputUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFPS, sizeof(maxFPS));
+	NSAssert(noErr == status, @"We need to set the maximum FPS to the output node. %d", (int)status);
 	
 	// 設定 render callback
 	AURenderCallbackStruct callbackStruct;
 	callbackStruct.inputProcRefCon = (__bridge void *)(self);
 	callbackStruct.inputProc = AUPlayerAURenderCallback;
-	status = AudioUnitSetProperty(audioUnit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Global, 0, &callbackStruct, sizeof(callbackStruct));
+	status = AUGraphSetNodeInputCallback(audioGraph, mixerNode, 0, &callbackStruct);
+	NSAssert(noErr == status, @"Must be no error.");
+	
+	status = AUGraphInitialize(audioGraph);
 	NSAssert(noErr == status, @"Must be no error.");
 	
 	// 建立 converter 要使用的 buffer list
@@ -123,6 +198,8 @@ AudioStreamBasicDescription KKSignedIntLinearPCMStreamDescription()
 	renderBufferList->mBuffers[0].mNumberChannels = 2;
 	renderBufferList->mBuffers[0].mDataByteSize = bufferSize;
 	renderBufferList->mBuffers[0].mData = calloc(1, bufferSize);
+	
+	CAShow(audioGraph);
 }
 
 - (id)initWithURL:(NSURL *)inURL {
@@ -158,14 +235,36 @@ AudioStreamBasicDescription KKSignedIntLinearPCMStreamDescription()
 
 - (void)play
 {
-	OSStatus status = AudioOutputUnitStart(audioUnit);
+	if (!playerStatus.stopped) {
+		return;
+	}
+	OSStatus status = AUGraphStart(audioGraph);
+	NSAssert(noErr == status, @"AUGraphStart, error: %ld", (signed long)status);
+	status = AudioOutputUnitStart(outputUnit);
 	NSAssert(noErr == status, @"AudioOutputUnitStart, error: %ld", (signed long)status);
+	playerStatus.stopped = NO;
 }
 
 - (void)pause
 {
-	OSStatus status = AudioOutputUnitStop(audioUnit);
+	OSStatus status = AUGraphStop(audioGraph);
+	NSAssert(noErr == status, @"AUGraphStop, error: %ld", (signed long)status);
+	status = AudioOutputUnitStop(outputUnit);
 	NSAssert(noErr == status, @"AudioOutputUnitStop, error: %ld", (signed long) status);
+}
+
+- (CFArrayRef)iPodEQPresentsArray
+{
+	CFArrayRef array;
+	UInt32 size = sizeof(array);
+	AudioUnitGetProperty(EQUnit, kAudioUnitProperty_FactoryPresets, kAudioUnitScope_Global, 0, &array, &size);
+	return array;
+}
+
+- (void)selectEQPresent:(NSInteger)value
+{
+	AUPreset *aPresent = (AUPreset *)CFArrayGetValueAtIndex(self.iPodEQPresentsArray, value);
+	AudioUnitSetProperty(EQUnit, kAudioUnitProperty_PresentPreset, kAudioUnitScope_Global, 0, aPresent, sizeof(aPresent));
 }
 
 #pragma mark - NSURLSessionDataDelegate
@@ -240,7 +339,9 @@ AudioStreamBasicDescription KKSignedIntLinearPCMStreamDescription()
 	return playerStatus.stopped;
 }
 
-- (OSStatus)callbackWithNumberOfFrames:(UInt32)inNumberOfFrames ioData:(AudioBufferList *)inIoData busNumber:(UInt32)inBusNumber
+- (OSStatus)callbackWithNumberOfFrames:(UInt32)inNumberOfFrames
+								ioData:(AudioBufferList *)inIoData
+							 busNumber:(UInt32)inBusNumber
 {
 	@synchronized (self) {
 		if (readHead < [packets count]) {
